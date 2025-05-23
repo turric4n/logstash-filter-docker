@@ -84,3 +84,102 @@ Programming is not a required skill. Whatever you've seen about open source and 
 It is more important to the community that you are able to contribute.
 
 For more information about contributing, see the [CONTRIBUTING](https://github.com/elastic/logstash/blob/main/CONTRIBUTING.md) file.
+
+# Logstash Docker Labels Filter Plugin
+
+This is a Logstash filter plugin that enriches events with Docker service label information. It allows you to look up Docker service labels based on a field in your event and add the corresponding label value to your event.
+
+## Installation
+
+### Using Logstash Plugin Manager
+
+bin/logstash-plugin install logstash-filter-docker_labels
+
+### Manual Installation
+
+git clone https://github.com/yourusername/logstash-filter-docker.git cd logstash-filter-docker gem build logstash-filter-dockerlabels.gemspec bin/logstash-plugin install --no-verify --local ./logstash-filter-dockerlabels-0.1.0.gem
+
+## Configuration
+
+The plugin supports the following configuration options:
+
+| Parameter | Description | Type | Required | Default |
+| --- | --- | --- | --- | --- |
+| `input` | Source field to read the lookup value from | string | Yes | - |
+| `output` | Target field to write the matched Docker label value | string | Yes | - |
+| `api_url` | URL of the HTTP API endpoint that returns Docker services | string | No | `http://localhost:5000/docker-services` |
+| `cache_ttl` | Time to live in minutes for cached values | number | No | 5 |
+| `input_label` | Label name in Docker service to match against | string | No | `logstash.docker.input` |
+| `output_label` | Label name in Docker service to retrieve value from | string | No | `logstash.docker.output` |
+
+## Example Configuration
+
+```ruby
+filter {
+  docker_labels {
+    input => "hostname"
+    output => "elasticsearch_host"
+    api_url => "http://docker-api:5000/docker-services"
+    input_label => "logstash.docker.input"
+    output_label => "logstash.docker.output"
+    cache_ttl => 10
+  }
+}
+
+HTTP API Requirements
+The plugin requires an HTTP endpoint that returns a JSON array of Docker services. Each service should contain a labels object with the configured input and output label keys.
+
+Example response from the API:
+
+[
+  {
+    "id": "988y1stob4ljjeq5wssg7p6q9",
+    "name": "whoami_ui",
+    "labels": {
+      "logstash.docker.input": "whoami.turrican.top",
+      "logstash.docker.output": "localhost:9200",
+      "com.docker.stack.namespace": "whoami",
+      "traefik.enable": "true"
+    }
+  },
+  {
+    "id": "jdiuzzn3ltov7yi5yczo8yn8j",
+    "name": "portainer_agent",
+    "labels": {
+      "com.docker.stack.namespace": "portainer"
+    }
+  }
+]
+
+
+GitHub Copilot
+bin/logstash-plugin install logstash-filter-docker_labels
+
+git clone https://github.com/yourusername/logstash-filter-docker.git cd logstash-filter-docker gem build logstash-filter-dockerlabels.gemspec bin/logstash-plugin install --no-verify --local ./logstash-filter-dockerlabels-0.1.0.gem
+
+HTTP API Requirements
+The plugin requires an HTTP endpoint that returns a JSON array of Docker services. Each service should contain a labels object with the configured input and output label keys.
+
+Example response from the API:
+
+Architecture
+Example Use Case
+You have various Docker services with specific configurations in their labels. In your log events, you have the service hostname, but you need to direct logs to different Elasticsearch clusters based on the service.
+
+Configure each Docker service with labels:
+
+logstash.docker.input = service hostname
+logstash.docker.output = Elasticsearch endpoint
+Configure this filter to:
+
+Read the hostname from each log event
+Look up the corresponding Elasticsearch endpoint
+Add it to the event
+Configure Elasticsearch output to use the dynamically added field.
+
+Contributing
+Fork the repository
+Create a feature branch
+Make your changes
+Write tests for your changes
+Submit a pull request
