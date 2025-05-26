@@ -32,6 +32,9 @@ class LogStash::Filters::DockerLabels < LogStash::Filters::Base
   
   # Comparison type for matching input value with label value
   config :comparison_type, :validate => ["equals", "contains", "starts_with", "ends_with", "not_equals", "regex"], :default => "equals"
+  
+  # Fallback output value to use when no match is found
+  config :fallback_output, :validate => :string, :default => nil
 
   public
   def register
@@ -69,6 +72,9 @@ class LogStash::Filters::DockerLabels < LogStash::Filters::Base
     
     # If not in cache or expired, find in services
     output_value = find_service_output(input_value)
+    
+    # Use fallback if no match found
+    output_value = @fallback_output if output_value.nil?
     
     # Update cache
     @cache[input_value] = output_value
