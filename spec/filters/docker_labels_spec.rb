@@ -126,4 +126,225 @@ describe LogStash::Filters::DockerLabels do
       end
     end
   end
+  
+  describe "Comparison types" do
+    let(:mock_services_json) do
+      '[
+        {"id":"service1","name":"service1","labels":{"logstash.docker.input":"exact-match","logstash.docker.output":"exact-value"}},
+        {"id":"service2","name":"service2","labels":{"logstash.docker.input":"this-contains-substring-here","logstash.docker.output":"contains-value"}},
+        {"id":"service3","name":"service3","labels":{"logstash.docker.input":"starts-with-prefix","logstash.docker.output":"starts-with-value"}},
+        {"id":"service4","name":"service4","labels":{"logstash.docker.input":"suffix-ends-with","logstash.docker.output":"ends-with-value"}},
+        {"id":"service5","name":"service5","labels":{"logstash.docker.input":"not-equal-test","logstash.docker.output":"not-equal-value"}},
+        {"id":"service6","name":"service6","labels":{"logstash.docker.input":"regex-test-123","logstash.docker.output":"regex-value"}}
+      ]'
+    end
+    
+    before do
+      # Setup mock response for all tests in this describe block
+      mock_response = double("response")
+      allow(mock_response).to receive(:is_a?).with(Net::HTTPSuccess).and_return(true)
+      allow(mock_response).to receive(:body).and_return(mock_services_json)
+      allow(Net::HTTP).to receive(:get_response).and_return(mock_response)
+    end
+
+    context "with 'equals' comparison (default)" do
+      let(:config) do
+        {
+          "input" => "hostname",
+          "output" => "target_es",
+          "comparison_type" => "equals"
+        }
+      end
+      
+      before do
+        plugin.register
+      end
+      
+      it "matches exact values" do
+        event = LogStash::Event.new("hostname" => "exact-match")
+        plugin.filter(event)
+        expect(event.get("target_es")).to eq("exact-value")
+      end
+      
+      it "doesn't match partial values" do
+        event = LogStash::Event.new("hostname" => "exact")
+        plugin.filter(event)
+        expect(event.get("target_es")).to be_nil
+      end
+    end
+    
+    context "with 'contains' comparison" do
+      let(:config) do
+        {
+          "input" => "hostname",
+          "output" => "target_es",
+          "comparison_type" => "contains"
+        }
+      end
+      
+      before do
+        plugin.register
+      end
+      
+      it "matches when label contains the input value" do
+        event = LogStash::Event.new("hostname" => "substring")
+        plugin.filter(event)
+        expect(event.get("target_es")).to eq("contains-value")
+      end
+      
+      it "doesn't match when label doesn't contain the input value" do
+        event = LogStash::Event.new("hostname" => "missing-text")
+        plugin.filter(event)
+        expect(event.get("target_es")).to be_nil
+      end
+    end
+    
+    context "with 'starts_with' comparison" do
+      let(:config) do
+        {
+          "input" => "hostname",
+          "output" => "target_es",
+          "comparison_type" => "starts_with"
+        }
+      end
+      
+      before do
+        plugin.register
+      end
+      
+      it "matches when label starts with the input value" do
+        event = LogStash::Event.new("hostname" => "starts-with")
+        plugin.filter(event)
+        expect(event.get("target_es")).to eq("starts-with-value")
+      end
+      
+      it "doesn't match when label doesn't start with the input value" do
+        event = LogStash::Event.new("hostname" => "with-prefix")
+        plugin.filter(event)
+        expect(event.get("target_es")).to be_nil
+      end
+    end
+    
+    context "with 'ends_with' comparison" do
+      let(:config) do
+        {
+          "input" => "hostname",
+          "output" => "target_es",
+          "comparison_type" => "ends_with"
+        }
+      end
+      
+      before do
+        plugin.register
+      end
+      
+      it "matches when label ends with the input value" do
+        event = LogStash::Event.new("hostname" => "ends-with")
+        plugin.filter(event)
+        expect(event.get("target_es")).to eq("ends-with-value")
+      end
+      
+      it "doesn't match when label doesn't end with the input value" do
+        event = LogStash::Event.new("hostname" => "suffix")
+        plugin.filter(event)
+        expect(event.get("target_es")).to be_nil
+      end
+    end
+    
+    context "with 'not_equals' comparison" do
+      let(:config) do
+        {
+          "input" => "hostname",
+          "output" => "target_es",
+          "comparison_type" => "not_equals"
+        }
+      end
+      
+      before do
+        plugin.register
+      end
+      
+      it "matches when label is not equal to input value" do
+        event = LogStash::Event.new("hostname" => "different-value")
+        plugin.filter(event)
+        expect(event.get("target_es")).to eq("not-equal-value")
+      end
+      
+      it "doesn't match when label equals the input value" do
+        event = LogStash::Event.new("hostname" => "not-equal-test")
+        plugin.filter(event)
+        expect(event.get("target_es")).to be_nil
+      end
+    end
+    
+    context "with 'regex' comparison" do
+      let(:config) do
+        {
+          "input" => "hostname",
+          "output" => "target_es",
+          "comparison_type" => "regex"
+        }
+      end
+      
+      before do
+        plugin.register
+      end
+      
+      it "matches when label matches the regex pattern" do
+        event = LogStash::Event.new("hostname" => "regex-test-\\d+")
+        plugin.filter(event)
+        expect(event.get("target_es")).to eq("regex-value")
+      end
+      
+      it "doesn't match when label doesn't match the regex pattern" do
+        event = LogStash::Event.new("hostname" => "regex-[a-z]+")
+        plugin.filter(event)
+        expect(event.get("target_es")).to be_nil
+      end
+    end
+  end
+  
+  describe "Exception handling" do
+    let(:config) do
+      {
+        "input" => "hostname",
+        "output" => "target_es"
+      }
+    end
+    
+    before do
+      plugin.register
+    end
+    
+    context "when HTTP request raises an exception" do
+      let(:event) { LogStash::Event.new("hostname" => "test-host") }
+      
+      before do
+        allow(Net::HTTP).to receive(:get_response).and_raise(StandardError.new("Connection failed"))
+      end
+      
+      it "logs the error and sets the output field to nil" do
+        expect(plugin.logger).to receive(:error).with("Error querying Docker services API", hash_including(:exception => "Connection failed"))
+        plugin.filter(event)
+        expect(event.get("target_es")).to be_nil
+      end
+    end
+    
+    context "when JSON parsing fails" do
+      let(:event) { LogStash::Event.new("hostname" => "test-host") }
+      
+      before do
+        mock_response = double("response")
+        allow(mock_response).to receive(:is_a?).with(Net::HTTPSuccess).and_return(true)
+        allow(mock_response).to receive(:body).and_return("invalid json")
+        allow(Net::HTTP).to receive(:get_response).and_return(mock_response)
+      end
+      
+      it "logs the error and sets the output field to nil" do
+        expect(plugin.logger).to receive(:error).with("Error querying Docker services API", hash_including(:exception => /unexpected token/i))
+        plugin.filter(event)
+        expect(event.get("target_es")).to be_nil
+      end
+    end
+  end
 end

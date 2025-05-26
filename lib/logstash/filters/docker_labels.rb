@@ -26,6 +26,9 @@ class LogStash::Filters::DockerLabels < LogStash::Filters::Base
   # Label names in Docker services
   config :input_label, :validate => :string, :default => "logstash.docker.input"
   config :output_label, :validate => :string, :default => "logstash.docker.output"
+  
+  # Comparison type for matching input value with label value
+  config :comparison_type, :validate => ["equals", "contains", "starts_with", "ends_with", "not_equals", "regex"], :default => "equals"
 
   public
   def register
@@ -80,7 +83,8 @@ class LogStash::Filters::DockerLabels < LogStash::Filters::Base
         # Find service with matching input label
         matching_service = services.find do |service|
           if service["labels"] && service["labels"][@input_label]
-            service["labels"][@input_label] == input_value
+            label_value = service["labels"][@input_label]
+            compare_values(input_value, label_value)
           else
             false
           end
@@ -99,5 +103,26 @@ class LogStash::Filters::DockerLabels < LogStash::Filters::Base
     
     # Default return value is null if no match found or error occurred
     return nil
+  end
+  
+  private
+  def compare_values(input_value, label_value)
+    case @comparison_type
+    when "equals"
+      label_value == input_value
+    when "contains"
+      label_value.include?(input_value)
+    when "starts_with"
+      label_value.start_with?(input_value)
+    when "ends_with"
+      label_value.end_with?(input_value)
+    when "not_equals"
+      label_value != input_value
+    when "regex"
+      !!(label_value =~ Regexp.new(input_value))
+    else
+      # Default to equals if something unexpected happens
+      label_value == input_value
+    end
   end
 end
