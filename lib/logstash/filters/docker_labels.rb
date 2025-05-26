@@ -20,8 +20,11 @@ class LogStash::Filters::DockerLabels < LogStash::Filters::Base
   # API URL to fetch Docker services
   config :api_url, :validate => :string, :default => "http://localhost:5000/docker-services"
   
-  # Cache TTL in minutes
+  # Cache TTL in minutes for individual lookups
   config :cache_ttl, :validate => :number, :default => 5
+  
+  # Services cache TTL in minutes
+  config :services_cache_ttl, :validate => :number, :default => 10
 
   # Label names in Docker services
   config :input_label, :validate => :string, :default => "logstash.docker.input"
@@ -34,9 +37,13 @@ class LogStash::Filters::DockerLabels < LogStash::Filters::Base
   def register
     @logger = self.logger
     
-    # Initialize cache
+    # Initialize value cache
     @cache = {}
     @cache_timestamps = {}
+    
+    # Initialize services cache
+    @services_cache = nil
+    @services_cache_timestamp = nil
   end
 
   public
@@ -52,7 +59,7 @@ class LogStash::Filters::DockerLabels < LogStash::Filters::Base
   
   private
   def get_output_for_input(input_value)
-    # Check cache first
+    # Check value cache first
     if @cache.has_key?(input_value)
       timestamp = @cache_timestamps[input_value]
       if Time.now - timestamp < @cache_ttl * 60 # TTL in seconds
@@ -60,8 +67,8 @@ class LogStash::Filters::DockerLabels < LogStash::Filters::Base
       end
     end
     
-    # If not in cache or expired, query the API
-    output_value = get_service_label_output(input_value)
+    # If not in cache or expired, find in services
+    output_value = find_service_output(input_value)
     
     # Update cache
     @cache[input_value] = output_value
@@ -71,29 +78,50 @@ class LogStash::Filters::DockerLabels < LogStash::Filters::Base
   end
   
   private
-  def get_service_label_output(input_value)
+  def find_service_output(input_value)
+    # Get the services (either from cache or from API)
+    services = get_services()
+    return nil unless services
+    
+    # Find service with matching input label
+    matching_service = services.find do |service|
+      if service["labels"] && service["labels"][@input_label]
+        label_value = service["labels"][@input_label]
+        compare_values(input_value, label_value)
+      else
+        false
+      end
+    end
+    
+    # If matching service found, get output label value
+    if matching_service && matching_service["labels"]
+      return matching_service["labels"][@output_label] || nil
+    end
+    
+    # No match found
+    return nil
+  end
+  
+  private
+  def get_services
+    # Check if services cache is valid
+    if @services_cache && @services_cache_timestamp
+      if Time.now - @services_cache_timestamp < @services_cache_ttl * 60 # TTL in seconds
+        return @services_cache
+      end
+    end
+    
+    # Cache expired or not set, query the API
     begin
       # Query the HTTP API for Docker services
       uri = URI(@api_url)
       response = Net::HTTP.get_response(uri)
       
       if response.is_a?(Net::HTTPSuccess)
-        services = JSON.parse(response.body)
-        
-        # Find service with matching input label
-        matching_service = services.find do |service|
-          if service["labels"] && service["labels"][@input_label]
-            label_value = service["labels"][@input_label]
-            compare_values(input_value, label_value)
-          else
-            false
-          end
-        end
-        
-        # If matching service found, get output label value
-        if matching_service && matching_service["labels"]
-          return matching_service["labels"][@output_label] || nil
-        end
+        # Parse and cache the services
+        @services_cache = JSON.parse(response.body)
+        @services_cache_timestamp = Time.now
+        return @services_cache
       else
         @logger.error("Failed to fetch services from API", :status => response.code)
       end
@@ -101,7 +129,7 @@ class LogStash::Filters::DockerLabels < LogStash::Filters::Base
       @logger.error("Error querying Docker services API", :exception => e.message, :backtrace => e.backtrace)
     end
     
-    # Default return value is null if no match found or error occurred
+    # Return nil on failure, which will lead to returning nil for the output value
     return nil
   end
   
