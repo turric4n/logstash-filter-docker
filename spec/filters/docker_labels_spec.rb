@@ -304,6 +304,213 @@ describe LogStash::Filters::DockerLabels do
     end
   end
   
+  describe "Input comparison types" do
+    let(:mock_services_json) do
+      '[
+        {"id":"service1","name":"service1","labels":{"logstash.docker.input":"exact-match","logstash.docker.output":"exact-value"}},
+        {"id":"service2","name":"service2","labels":{"logstash.docker.input":"this-contains-substring-here","logstash.docker.output":"contains-value"}},
+        {"id":"service3","name":"service3","labels":{"logstash.docker.input":"starts-with-prefix","logstash.docker.output":"starts-with-value"}},
+        {"id":"service4","name":"service4","labels":{"logstash.docker.input":"suffix-ends-with","logstash.docker.output":"ends-with-value"}},
+        {"id":"service5","name":"service5","labels":{"logstash.docker.input":"not-equal-test","logstash.docker.output":"not-equal-value"}},
+        {"id":"service6","name":"service6","labels":{"logstash.docker.input":"regex-test-123","logstash.docker.output":"regex-value"}}
+      ]'
+    end
+    
+    before do
+      # Setup mock response for all tests in this describe block
+      mock_response = double("response")
+      allow(mock_response).to receive(:is_a?).with(Net::HTTPSuccess).and_return(true)
+      allow(mock_response).to receive(:body).and_return(mock_services_json)
+      allow(Net::HTTP).to receive(:get_response).and_return(mock_response)
+    end
+
+    context "with 'input_comparison_type' set to 'equals'" do
+      let(:config) do
+        {
+          "input" => "hostname",
+          "output" => "target_es",
+          "input_comparison_type" => "equals",
+          # Set comparison_type to something different to ensure input_comparison_type takes precedence
+          "comparison_type" => "contains"
+        }
+      end
+      
+      before do
+        plugin.register
+      end
+      
+      it "matches exact values using input_comparison_type, not comparison_type" do
+        event = LogStash::Event.new("hostname" => "exact-match")
+        plugin.filter(event)
+        expect(event.get("target_es")).to eq("exact-value")
+        
+        # This would match if using comparison_type (contains) but doesn't with input_comparison_type (equals)
+        event2 = LogStash::Event.new("hostname" => "substring")
+        plugin.filter(event2)
+        expect(event2.get("target_es")).to be_nil
+      end
+    end
+    
+    context "with 'input_comparison_type' set to 'contains'" do
+      let(:config) do
+        {
+          "input" => "hostname",
+          "output" => "target_es",
+          "input_comparison_type" => "contains"
+        }
+      end
+      
+      before do
+        plugin.register
+      end
+      
+      it "matches when label contains the input value" do
+        event = LogStash::Event.new("hostname" => "substring")
+        plugin.filter(event)
+        expect(event.get("target_es")).to eq("contains-value")
+      end
+    end
+    
+    context "with 'input_comparison_type' set to 'starts_with'" do
+      let(:config) do
+        {
+          "input" => "hostname",
+          "output" => "target_es",
+          "input_comparison_type" => "starts_with"
+        }
+      end
+      
+      before do
+        plugin.register
+      end
+      
+      it "matches when label starts with the input value" do
+        event = LogStash::Event.new("hostname" => "starts-with")
+        plugin.filter(event)
+        expect(event.get("target_es")).to eq("starts-with-value")
+      end
+    end
+    
+    context "with 'input_comparison_type' set to 'ends_with'" do
+      let(:config) do
+        {
+          "input" => "hostname",
+          "output" => "target_es",
+          "input_comparison_type" => "ends_with"
+        }
+      end
+      
+      before do
+        plugin.register
+      end
+      
+      it "matches when label ends with the input value" do
+        event = LogStash::Event.new("hostname" => "ends-with")
+        plugin.filter(event)
+        expect(event.get("target_es")).to eq("ends-with-value")
+      end
+    end
+    
+    context "with 'input_comparison_type' set to 'not_equals'" do
+      let(:config) do
+        {
+          "input" => "hostname",
+          "output" => "target_es",
+          "input_comparison_type" => "not_equals"
+        }
+      end
+      
+      before do
+        plugin.register
+      end
+      
+      it "matches when label is not equal to input value" do
+        event = LogStash::Event.new("hostname" => "different-value")
+        plugin.filter(event)
+        expect(event.get("target_es")).to eq("not-equal-value")
+      end
+    end
+    
+    context "with 'input_comparison_type' set to 'regex'" do
+      let(:config) do
+        {
+          "input" => "hostname",
+          "output" => "target_es",
+          "input_comparison_type" => "regex"
+        }
+      end
+      
+      before do
+        plugin.register
+      end
+      
+      it "matches when label matches the regex pattern" do
+        event = LogStash::Event.new("hostname" => "regex-test-\\d+")
+        plugin.filter(event)
+        expect(event.get("target_es")).to eq("regex-value")
+      end
+    end
+    
+    context "with different 'input_comparison_type' and 'comparison_type'" do
+      let(:config) do
+        {
+          "input" => "hostname",
+          "output" => "target_es",
+          "input_comparison_type" => "equals",
+          "comparison_type" => "contains"
+        }
+      end
+      
+      before do
+        plugin.register
+      end
+      
+      it "prioritizes input_comparison_type for the input label comparison" do
+        # This should match with equals comparison
+        event1 = LogStash::Event.new("hostname" => "exact-match")
+        plugin.filter(event1)
+        expect(event1.get("target_es")).to eq("exact-value")
+        
+        # This would match with contains but should not match with equals
+        event2 = LogStash::Event.new("hostname" => "match")
+        plugin.filter(event2)
+        expect(event2.get("target_es")).to be_nil
+      end
+    end
+  end
+  
+  describe "Fallback output value" do
+    let(:config) do
+      {
+        "input" => "hostname",
+        "output" => "target_es",
+        "fallback_output" => "default-elasticsearch"
+      }
+    end
+    
+    before do
+      plugin.register
+      
+      # Mock empty services response
+      mock_response = double("response")
+      allow(mock_response).to receive(:is_a?).with(Net::HTTPSuccess).and_return(true)
+      allow(mock_response).to receive(:body).and_return('[]')
+      allow(Net::HTTP).to receive(:get_response).and_return(mock_response)
+    end
+    
+    it "uses fallback value when no match is found" do
+      event = LogStash::Event.new("hostname" => "non-existent-host")
+      plugin.filter(event)
+      expect(event.get("target_es")).to eq("default-elasticsearch")
+    end
+    
+    it "doesn't use fallback when input field is missing" do
+      event = LogStash::Event.new("other_field" => "value")
+      plugin.filter(event)
+      expect(event.get("target_es")).to be_nil
+    end
+  end
+  
   describe "Exception handling" do
     let(:config) do
       {

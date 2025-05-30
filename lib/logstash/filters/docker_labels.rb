@@ -29,8 +29,11 @@ class LogStash::Filters::DockerLabels < LogStash::Filters::Base
   # Label names in Docker services
   config :input_label, :validate => :string, :default => "logstash.docker.input"
   config :output_label, :validate => :string, :default => "logstash.docker.output"
+
+  # Comparison type for matching field value with input_label value
+  config :input_comparison_type, :validate => ["equals", "contains", "starts_with", "ends_with", "not_equals", "regex"], :default => "equals"
   
-  # Comparison type for matching input value with label value
+  # Comparison type for other value comparisons
   config :comparison_type, :validate => ["equals", "contains", "starts_with", "ends_with", "not_equals", "regex"], :default => "equals"
   
   # Fallback output value to use when no match is found
@@ -93,7 +96,8 @@ class LogStash::Filters::DockerLabels < LogStash::Filters::Base
     matching_service = services.find do |service|
       if service["labels"] && service["labels"][@input_label]
         label_value = service["labels"][@input_label]
-        compare_values(input_value, label_value)
+        # Use the input_comparison_type for comparing input_value with label_value
+        compare_values(input_value, label_value, @input_comparison_type)
       else
         false
       end
@@ -140,8 +144,11 @@ class LogStash::Filters::DockerLabels < LogStash::Filters::Base
   end
   
   private
-  def compare_values(input_value, label_value)
-    case @comparison_type
+  def compare_values(input_value, label_value, comparison_type = nil)
+    # Use provided comparison_type or fall back to default class setting
+    comparison_type ||= @comparison_type
+    
+    case comparison_type
     when "equals"
       label_value == input_value
     when "contains"
