@@ -20,6 +20,9 @@ class LogStash::Filters::DockerLabels < LogStash::Filters::Base
   # API URL to fetch Docker services
   config :api_url, :validate => :string, :default => "http://localhost:5000/docker-services"
   
+  # Enable or disable caching
+  config :use_cache, :validate => :boolean, :default => true
+  
   # Cache TTL in minutes for individual lookups
   config :cache_ttl, :validate => :number, :default => 5
   
@@ -30,14 +33,17 @@ class LogStash::Filters::DockerLabels < LogStash::Filters::Base
   config :input_label, :validate => :string, :default => "logstash.docker.input"
   config :output_label, :validate => :string, :default => "logstash.docker.output"
 
-  # Comparison type for matching field value with input_label value
-  config :input_comparison_type, :validate => ["equals", "contains", "starts_with", "ends_with", "not_equals", "regex"], :default => "equals"
+  # Comparison type for matching label keys with the input_label pattern
+  config :input_label_comparison_type, :validate => ["equals", "contains", "starts_with", "ends_with", "not_equals", "regex"], :default => "equals"
   
-  # Comparison type for other value comparisons
-  config :comparison_type, :validate => ["equals", "contains", "starts_with", "ends_with", "not_equals", "regex"], :default => "equals"
+  # Comparison type for matching field value with label value
+  config :input_comparison_type, :validate => ["equals", "contains", "starts_with", "ends_with", "not_equals", "regex"], :default => "equals"
   
   # Fallback output value to use when no match is found
   config :fallback_output, :validate => :string, :default => nil
+  
+  # Enable debug output
+  config :debug, :validate => :boolean, :default => false
 
   public
   def register
@@ -50,14 +56,40 @@ class LogStash::Filters::DockerLabels < LogStash::Filters::Base
     # Initialize services cache
     @services_cache = nil
     @services_cache_timestamp = nil
+    
+    if @debug
+      @logger.info("Docker Labels filter initialized with debug mode", 
+        :input => @input,
+        :output => @output,
+        :input_label => @input_label,
+        :output_label => @output_label,
+        :input_label_comparison_type => @input_label_comparison_type,
+        :input_comparison_type => @input_comparison_type,
+        :use_cache => @use_cache)
+      
+      if !@use_cache
+        @logger.info("Caching is disabled")
+      end
+    end
   end
 
   public
   def filter(event)
     input_value = event.get(@input)
     if input_value
+      if @debug
+        @logger.info("Processing input value", :input_field => @input, :input_value => input_value)
+      end
+      
       output_value = get_output_for_input(input_value)
+      
+      if @debug
+        @logger.info("Setting output value", :output_field => @output, :output_value => output_value)
+      end
+      
       event.set(@output, output_value)
+    elsif @debug
+      @logger.info("Input field not found in event", :input_field => @input)
     end
 
     filter_matched(event)
@@ -65,23 +97,47 @@ class LogStash::Filters::DockerLabels < LogStash::Filters::Base
   
   private
   def get_output_for_input(input_value)
-    # Check value cache first
-    if @cache.has_key?(input_value)
+    # Check value cache first (if caching is enabled)
+    if @use_cache && @cache.has_key?(input_value)
       timestamp = @cache_timestamps[input_value]
       if Time.now - timestamp < @cache_ttl * 60 # TTL in seconds
+        if @debug
+          @logger.info("Cache hit", :input_value => input_value, :output_value => @cache[input_value])
+        end
         return @cache[input_value]
+      elsif @debug
+        @logger.info("Cache expired", :input_value => input_value, :age => (Time.now - timestamp)/60.0, :ttl => @cache_ttl)
+      end
+    elsif @debug
+      if !@use_cache
+        @logger.info("Cache lookup skipped (caching disabled)", :input_value => input_value)
+      else
+        @logger.info("Cache miss", :input_value => input_value)
       end
     end
     
-    # If not in cache or expired, find in services
+    # If not in cache, cache disabled, or expired, find in services
     output_value = find_service_output(input_value)
     
     # Use fallback if no match found
-    output_value = @fallback_output if output_value.nil?
+    if output_value.nil?
+      if @debug && !@fallback_output.nil?
+        @logger.info("Using fallback output", :fallback_value => @fallback_output)
+      end
+      output_value = @fallback_output
+    end
     
-    # Update cache
-    @cache[input_value] = output_value
-    @cache_timestamps[input_value] = Time.now
+    # Update cache (if caching is enabled)
+    if @use_cache
+      @cache[input_value] = output_value
+      @cache_timestamps[input_value] = Time.now
+      
+      if @debug
+        @logger.info("Updated cache", :input_value => input_value, :output_value => output_value)
+      end
+    elsif @debug
+      @logger.info("Skipped cache update (caching disabled)", :input_value => input_value)
+    end
     
     return output_value
   end
@@ -90,48 +146,153 @@ class LogStash::Filters::DockerLabels < LogStash::Filters::Base
   def find_service_output(input_value)
     # Get the services (either from cache or from API)
     services = get_services()
-    return nil unless services
+    
+    if services.nil?
+      @logger.warn("No services available") if @debug
+      return nil
+    end
+    
+    if @debug
+      @logger.info("Searching through services", :service_count => services.length)
+    end
     
     # Find service with matching input label
-    matching_service = services.find do |service|
-      if service["labels"] && service["labels"][@input_label]
-        label_value = service["labels"][@input_label]
-        # Use the input_comparison_type for comparing input_value with label_value
-        compare_values(input_value, label_value, @input_comparison_type)
-      else
-        false
+    matching_service = nil
+    
+    services.each do |service|
+      next unless service["labels"]
+      
+      if @debug
+        @logger.info("Checking service", 
+          :service_name => service["name"], 
+          :label_pattern => @input_label,
+          :comparison_type => @input_label_comparison_type)
+      end
+      
+      # Find matching label key
+      matching_key = nil
+      
+      service["labels"].keys.each do |key|
+        match = false
+        
+        if @input_label_comparison_type == "regex"
+          begin
+            # Convert escaped dots from \. to \.
+            fixed_pattern = @input_label.gsub(/\\+\./, '\.')
+            
+            if @debug
+              @logger.info("Trying regex match", 
+                :key => key, 
+                :pattern => fixed_pattern)
+            end
+            
+            match = !!(key =~ Regexp.new(fixed_pattern))
+            
+            if @debug && match
+              @logger.info("Regex match found!", :key => key, :pattern => fixed_pattern)
+            end
+          rescue => e
+            @logger.error("Regex error", :error => e.message, :pattern => @input_label)
+            match = false
+          end
+        elsif @input_label_comparison_type == "contains"
+          # For contains, convert escaped pattern to literal
+          plain_pattern = @input_label.gsub(/\\\./, '.')
+          match = key.include?(plain_pattern)
+        else
+          # Other comparison types
+          match = compare_values(key, @input_label, @input_label_comparison_type)
+        end
+        
+        if match
+          matching_key = key
+          break
+        end
+      end
+      
+      # If we found a matching key
+      if matching_key
+        label_value = service["labels"][matching_key]
+        
+        if @debug
+          @logger.info("Found matching label", 
+            :service_name => service["name"],
+            :label_key => matching_key,
+            :label_value => label_value)
+        end
+        
+        # Check if the input value matches the label value
+        value_match = compare_values(input_value, label_value, @input_comparison_type)
+        
+        if value_match
+          matching_service = service
+          break
+        end
       end
     end
     
-    # If matching service found, get output label value
+    # Rest of the method remains the same...
+    
     if matching_service && matching_service["labels"]
       return matching_service["labels"][@output_label] || nil
     end
     
-    # No match found
     return nil
   end
   
   private
   def get_services
-    # Check if services cache is valid
-    if @services_cache && @services_cache_timestamp
-      if Time.now - @services_cache_timestamp < @services_cache_ttl * 60 # TTL in seconds
+    # Check if services cache is valid (if caching is enabled)
+    if @use_cache && @services_cache && @services_cache_timestamp
+      cache_age = Time.now - @services_cache_timestamp
+      if cache_age < @services_cache_ttl * 60 # TTL in seconds
+        if @debug
+          @logger.info("Using cached services list", 
+            :cache_age => (cache_age/60.0).round(2),
+            :ttl => @services_cache_ttl,
+            :services_count => @services_cache.length)
+        end
         return @services_cache
+      elsif @debug
+        @logger.info("Services cache expired", 
+          :cache_age => (cache_age/60.0).round(2), 
+          :ttl => @services_cache_ttl)
       end
+    elsif @debug && !@use_cache
+      @logger.info("Services cache lookup skipped (caching disabled)")
     end
     
-    # Cache expired or not set, query the API
+    # Cache disabled, expired or not set, query the API
     begin
+      if @debug
+        @logger.info("Fetching services from API", :url => @api_url)
+      end
+      
       # Query the HTTP API for Docker services
       uri = URI(@api_url)
       response = Net::HTTP.get_response(uri)
       
       if response.is_a?(Net::HTTPSuccess)
-        # Parse and cache the services
-        @services_cache = JSON.parse(response.body)
-        @services_cache_timestamp = Time.now
-        return @services_cache
+        # Parse services
+        services = JSON.parse(response.body)
+        
+        # Cache the services (if caching is enabled)
+        if @use_cache
+          @services_cache = services
+          @services_cache_timestamp = Time.now
+          
+          if @debug
+            @logger.info("Services cached", :count => services.length)
+          end
+        elsif @debug
+          @logger.info("Services not cached (caching disabled)", :count => services.length)
+        end
+        
+        if @debug
+          @logger.info("Services fetched successfully", :count => services.length)
+        end
+        
+        return services
       else
         @logger.error("Failed to fetch services from API", :status => response.code)
       end
@@ -145,25 +306,64 @@ class LogStash::Filters::DockerLabels < LogStash::Filters::Base
   
   private
   def compare_values(input_value, label_value, comparison_type = nil)
-    # Use provided comparison_type or fall back to default class setting
-    comparison_type ||= @comparison_type
+    # Use provided comparison_type or fall back to default input_comparison_type (was comparison_type)
+    comparison_type ||= @input_comparison_type
+    
+    result = false
     
     case comparison_type
     when "equals"
-      label_value == input_value
+      result = (label_value == input_value)
+      if @debug
+        @logger.info("Equals comparison", :label => label_value, :input => input_value, :result => result)
+      end
+      
     when "contains"
-      label_value.include?(input_value)
+      result = label_value.include?(input_value)
+      if @debug
+        @logger.info("Contains comparison", :label => label_value, :input => input_value, :result => result)
+      end
+      
     when "starts_with"
-      label_value.start_with?(input_value)
+      result = label_value.start_with?(input_value)
+      if @debug
+        @logger.info("Starts with comparison", :label => label_value, :input => input_value, :result => result)
+      end
+      
     when "ends_with"
-      label_value.end_with?(input_value)
+      result = label_value.end_with?(input_value)
+      if @debug
+        @logger.info("Ends with comparison", :label => label_value, :input => input_value, :result => result)
+      end
+      
     when "not_equals"
-      label_value != input_value
+      result = (label_value != input_value)
+      if @debug
+        @logger.info("Not equals comparison", :label => label_value, :input => input_value, :result => result)
+      end
+      
     when "regex"
-      !!(label_value =~ Regexp.new(input_value))
+      begin
+        result = !!(label_value =~ Regexp.new(input_value))
+        if @debug
+          @logger.info("Regex comparison", :label => label_value, :pattern => input_value, :result => result)
+        end
+      rescue RegexpError => e
+        @logger.error("Invalid regex pattern", :pattern => input_value, :error => e.message)
+        result = false
+      end
+      
     else
       # Default to equals if something unexpected happens
-      label_value == input_value
+      result = (label_value == input_value)
+      if @debug
+        @logger.info("Default equals comparison (unknown type: #{comparison_type})", 
+          :label => label_value, 
+          :input => input_value, 
+          :result => result)
+      end
     end
+    
+    return result
   end
 end

@@ -554,4 +554,112 @@ describe LogStash::Filters::DockerLabels do
       end
     end
   end
+
+  private
+  def find_service_output(input_value)
+    # Get the services (either from cache or from API)
+    services = get_services()
+    
+    if services.nil?
+      @logger.warn("No services available") if @debug
+      return nil
+    end
+    
+    if @debug
+      @logger.info("Searching through services", :service_count => services.length)
+    end
+    
+    # Find service with matching input label
+    matching_service = services.find do |service|
+      if service["labels"]
+        # Check if any label key matches our pattern
+        matching_label = nil
+        matching_value = nil
+        
+        # Try to find a label key that matches our regex pattern
+        service["labels"].each do |label_key, label_value|
+          begin
+            if @debug
+              @logger.info("Checking label against pattern", 
+                :label_key => label_key, 
+                :pattern => @input_label)
+            end
+            
+            # See if this label key matches our regex pattern
+            if label_key =~ Regexp.new(@input_label)
+              matching_label = label_key
+              matching_value = label_value
+              
+              if @debug
+                @logger.info("Found label matching pattern", 
+                  :label_key => label_key, 
+                  :label_value => label_value)
+              end
+              
+              break
+            end
+          rescue RegexpError => e
+            @logger.error("Invalid regex pattern for label", :pattern => @input_label, :error => e.message)
+          end
+        end
+        
+        # If we found a matching label
+        if matching_label
+          if @debug
+            @logger.info("Comparing label value with input", 
+              :label_value => matching_value, 
+              :input_value => input_value,
+              :comparison_type => @input_comparison_type)
+          end
+          
+          # Compare the label value with input_value
+          result = compare_values(input_value, matching_value, @input_comparison_type)
+          
+          if @debug
+            @logger.info("Comparison result", :matched => result)
+          end
+          
+          if result
+            # If label value matches our input, look for the output label
+            output_value = service["labels"][@output_label]
+            
+            if @debug
+              if output_value.nil?
+                @logger.info("Matched service missing output label", 
+                  :service_name => service["name"],
+                  :output_label => @output_label)
+              else
+                @logger.info("Found matching service with output", 
+                  :service_name => service["name"],
+                  :output_value => output_value)
+              end
+            end
+            
+            return true
+          end
+        else
+          if @debug
+            @logger.info("Service has no labels matching pattern", 
+              :service_name => service["name"],
+              :input_label_pattern => @input_label, 
+              :available_labels => service["labels"].keys)
+          end
+        end
+      end
+      
+      false
+    end
+    
+    # If matching service found, get output label value
+    if matching_service && matching_service["labels"]
+      return matching_service["labels"][@output_label] || nil
+    end
+    
+    if @debug
+      @logger.info("No matching service found")
+    end
+    
+    # No match found
+    return nil
+  end
 end
