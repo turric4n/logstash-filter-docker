@@ -117,7 +117,16 @@ class LogStash::Filters::DockerLabels < LogStash::Filters::Base
         if rule.is_a?(Hash) && rule.has_key?("input") && rule.has_key?("output")
           # Compare based on the rule's comparison type if specified
           comparison_type = rule["comparison_type"] || @input_comparison_type
-          compare_values(input_value, rule["input"], comparison_type)
+          
+          # Handle comma-separated input values
+          if rule["input"].is_a?(String) && rule["input"].include?(",")
+            # Split the rule input by comma and check if any value matches
+            rule["input"].split(",").any? do |part|
+              compare_values(input_value, part.strip, comparison_type)
+            end
+          else
+            compare_values(input_value, rule["input"], comparison_type)
+          end
         else
           false
         end
