@@ -45,10 +45,24 @@ class LogStash::Filters::DockerLabels < LogStash::Filters::Base
   # Enable debug output
   config :debug, :validate => :boolean, :default => false
 
+  # Fixed input-output rules that have priority over Docker service lookups
+  config :fixed_rules, :validate => :array, :default => []
+
   public
   def register
     @logger = self.logger
     
+    # Validate fixed_rules structure
+    @fixed_rules.each_with_index do |rule, index|
+      unless rule.is_a?(Hash) && rule.has_key?("input") && rule.has_key?("output")
+        raise LogStash::ConfigurationError, "Fixed rule at index #{index} must be a hash with 'input' and 'output' keys"
+      end
+      
+      if rule.has_key?("comparison_type") && !["equals", "contains", "starts_with", "ends_with", "not_equals", "regex"].include?(rule["comparison_type"])
+        raise LogStash::ConfigurationError, "Invalid comparison_type '#{rule["comparison_type"]}' in fixed rule at index #{index}"
+      end
+    end
+
     # Initialize value cache
     @cache = {}
     @cache_timestamps = {}
@@ -97,6 +111,31 @@ class LogStash::Filters::DockerLabels < LogStash::Filters::Base
   
   private
   def get_output_for_input(input_value)
+    # Check fixed rules first (highest priority)
+    if !@fixed_rules.empty?
+      matching_rule = @fixed_rules.find do |rule|
+        if rule.is_a?(Hash) && rule.has_key?("input") && rule.has_key?("output")
+          # Compare based on the rule's comparison type if specified
+          comparison_type = rule["comparison_type"] || @input_comparison_type
+          compare_values(input_value, rule["input"], comparison_type)
+        else
+          false
+        end
+      end
+      
+      if matching_rule
+        if @debug
+          @logger.info("Fixed rule match found", 
+            :input_value => input_value, 
+            :rule => matching_rule,
+            :output => matching_rule["output"])
+        end
+        return matching_rule["output"]
+      elsif @debug
+        @logger.info("No matching fixed rule found", :input_value => input_value)
+      end
+    end
+    
     # Check value cache first (if caching is enabled)
     if @use_cache && @cache.has_key?(input_value)
       timestamp = @cache_timestamps[input_value]

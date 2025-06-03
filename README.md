@@ -126,6 +126,7 @@ filter {
   }
 }
 
+
 HTTP API Requirements
 The plugin requires an HTTP endpoint that returns a JSON array of Docker services. Each service should contain a labels object with the configured input and output label keys.
 
@@ -151,7 +152,6 @@ Example response from the API:
   }
 ]
 
-
 GitHub Copilot
 bin/logstash-plugin install logstash-filter-docker_labels
 
@@ -176,6 +176,70 @@ Read the hostname from each log event
 Look up the corresponding Elasticsearch endpoint
 Add it to the event
 Configure Elasticsearch output to use the dynamically added field.
+
+```
+
+## Example Pipelines
+
+### Basic Usage
+
+```ruby
+filter {
+  docker_labels {
+    input => "hostname"
+    output => "elasticsearch_target"
+    api_url => "http://docker-api:5000/docker-services"
+    input_label => "logstash.docker.input"
+    output_label => "logstash.docker.output"
+  }
+}
+```
+
+```ruby
+filter {
+  docker_labels {
+    input => "[hostheader]"
+    output => "elasticsearch_target"
+    api_url => "http://docker-proxy/docker-services"
+    
+    # Docker service label matching
+    input_label => "traefik\\.http\\.routers\\..*\\.rule"
+    input_label_comparison_type => "regex"
+    input_comparison_type => "contains"
+    output_label => "logstash.docker.output"
+    
+    # Fixed rules take precedence over Docker lookups
+    fixed_rules => [
+      {
+        "input" => "api.example.com",
+        "output" => "api-elasticsearch:9200"
+      },
+      {
+        "input" => "legacy",
+        "output" => "legacy-elasticsearch:9200",
+        "comparison_type" => "contains"
+      }
+    ]
+    
+    # Cache settings
+    use_cache => true
+    cache_ttl => 5
+    services_cache_ttl => 10
+    
+    # Fallback when no match found
+    fallback_output => "default-elasticsearch:9200"
+    
+    # Enable for troubleshooting
+    debug => false
+  }
+  
+  # Use the matched elasticsearch target
+  elasticsearch {
+    hosts => ["%{elasticsearch_target}"]
+    index => "logs-%{+YYYY.MM.dd}"
+  }
+}
+```
 
 Contributing
 Fork the repository
